@@ -29,6 +29,7 @@ struct Config
     int plotHeight = 100;
     bool saveUserScale = false;
     float userScale = 1.0f;
+    bool autoAttach = false;
 
     // LLM assistant settings
 #ifdef __EMSCRIPTEN__
