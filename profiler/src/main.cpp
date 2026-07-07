@@ -17,6 +17,11 @@
 
 #ifdef _WIN32
 #  include <windows.h>
+#else
+#  include <unistd.h>
+#endif
+#ifdef __APPLE__
+#  include <mach-o/dyld.h>
 #endif
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -98,6 +103,7 @@ static ResolvService resolv( port );
 static char addr[1024] = { "127.0.0.1" };
 static ConnectionHistory* connHist;
 static std::atomic<ViewShutdown> viewShutdown { ViewShutdown::False };
+static tracy::unordered_flat_set<uint64_t> autoAttachedClients;
 static double animTime = 0;
 static float dpiScale = -1.f;
 static bool dpiScaleOverriddenFromEnv = false;
@@ -220,6 +226,7 @@ static void LoadConfig()
     double v1;
     if( ini_sget( ini, "core", "threadedRendering", "%d", &v ) ) s_config.threadedRendering = v;
     if( ini_sget( ini, "core", "focusLostLimit", "%d", &v ) ) s_config.focusLostLimit = v;
+    if( ini_sget( ini, "core", "autoAttach", "%d", &v ) ) s_config.autoAttach = v;
     if( ini_sget( ini, "timeline", "targetFps", "%d", &v ) && v >= 1 && v < 10000 ) s_config.targetFps = v;
     if( ini_sget( ini, "timeline", "dynamicColors", "%d", &v ) ) s_config.dynamicColors = v;
     if( ini_sget( ini, "timeline", "forceColors", "%d", &v ) ) s_config.forceColors = v;
@@ -246,6 +253,7 @@ static bool SaveConfig()
     fprintf( f, "[core]\n" );
     fprintf( f, "threadedRendering = %i\n", (int)s_config.threadedRendering );
     fprintf( f, "focusLostLimit = %i\n", (int)s_config.focusLostLimit );
+    fprintf( f, "autoAttach = %i\n", (int)s_config.autoAttach );
 
     fprintf( f, "\n[timeline]\n" );
     fprintf( f, "targetFps = %i\n", s_config.targetFps );
@@ -590,6 +598,46 @@ static void UpdateBroadcastClients()
     }
 }
 
+static const char* GetProfilerExecutablePath()
+{
+    static char path[1024] = {};
+    if( path[0] ) return path;
+#ifdef _WIN32
+    GetModuleFileNameA( nullptr, path, sizeof( path ) );
+#elif defined __APPLE__
+    uint32_t size = sizeof( path );
+    _NSGetExecutablePath( path, &size );
+#else
+    const auto len = readlink( "/proc/self/exe", path, sizeof( path ) - 1 );
+    if( len != -1 ) path[len] = '\0';
+#endif
+    return path;
+}
+
+static void SpawnProfiler( const char* addr, uint16_t port )
+{
+    const auto* exePath = GetProfilerExecutablePath();
+#ifdef _WIN32
+    char cmdline[2048];
+    sprintf( cmdline, "\"%s\" -a %s -p %" PRIu16, exePath, addr, port );
+    STARTUPINFOA si = {};
+    si.cb = sizeof( si );
+    PROCESS_INFORMATION pi = {};
+    CreateProcessA( nullptr, cmdline, nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr, &si, &pi );
+    if( pi.hProcess ) CloseHandle( pi.hProcess );
+    if( pi.hThread ) CloseHandle( pi.hThread );
+#else
+    pid_t pid = fork();
+    if( pid == 0 )
+    {
+        char portStr[16];
+        sprintf( portStr, "%" PRIu16, port );
+        execl( exePath, exePath, "-a", addr, "-p", portStr, (char*)nullptr );
+        _exit( 1 );
+    }
+#endif
+}
+
 static void TextComment( const char* str )
 {
     ImGui::SameLine();
@@ -647,6 +695,17 @@ static void DrawContents()
 
 #ifndef __EMSCRIPTEN__
     UpdateBroadcastClients();
+
+    if( s_config.autoAttach )
+    {
+        for( auto& v : clients )
+        {
+            if( v.second.protocolVersion != tracy::ProtocolVersion ) continue;
+            if( autoAttachedClients.find( v.first ) != autoAttachedClients.end() ) continue;
+            autoAttachedClients.emplace( v.first );
+            SpawnProfiler( v.second.address.c_str(), v.second.port );
+        }
+    }
 #endif
 
     int display_w, display_h;
@@ -933,6 +992,18 @@ static void DrawContents()
         if( ImGui::Button( ICON_FA_HEART " Sponsor" ) )
         {
             tracy::OpenWebpage( "https://github.com/sponsors/wolfpld/" );
+        }
+        ImGui::Separator();
+        ImGui::TextUnformatted( "Auto-attach" );
+        ImGui::SameLine();
+        tracy::DrawHelpMarker( "When enabled, the profiler will automatically spawn a new profiler window for each discovered client." );
+        ImGui::SameLine();
+        const auto autoAttachPrev = s_config.autoAttach;
+        tracy::ToggleButton( ICON_FA_WAND_MAGIC, s_config.autoAttach );
+        if( s_config.autoAttach != autoAttachPrev )
+        {
+            SaveConfig();
+            if( !s_config.autoAttach ) autoAttachedClients.clear();
         }
         if( updateVersion > tracy::FileVersion( tracy::Version::Major, tracy::Version::Minor, tracy::Version::Patch ) )
         {

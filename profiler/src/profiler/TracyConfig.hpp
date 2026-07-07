@@ -22,6 +22,7 @@ struct Config
     int shortenName = (int)ShortenName::NoSpaceAndNormalize;
     bool saveUserScale = false;
     float userScale = 1.0f;
+    bool autoAttach = false;
 };
 
 }
